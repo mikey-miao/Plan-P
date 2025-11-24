@@ -4,6 +4,39 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Project Sorter</title>
+    
+<style>
+  html, body {
+    /* 1. 基础重置 */
+    margin: 0;
+    padding: 0;
+    border: 0;
+    
+    /* 2. 强制盒模型，防止边框撑大尺寸 */
+    box-sizing: border-box;
+
+    /* 3. 【核心】锁死宽度和高度 */
+    /* 同时设置 width/height 和 min/max，让浏览器没有“自适应”的借口 */
+    width: 350px !important;
+    height: 450px !important;
+    min-width: 350px;
+    max-width: 350px;
+    min-height: 450px;
+    max-height: 450px;
+
+    /* 4. 【核心】隐藏 html/body 的滚动条 */
+    /* 这一点至关重要，防止浏览器因为滚动条预留空间而把窗口撑宽 */
+    overflow: hidden !important;
+  }
+
+  /* 确保 React 容器也占满空间 */
+  #root {
+    width: 100%;
+    height: 100%;
+    overflow: hidden; /* 这里也可以加一层保险 */
+  }
+</style>
+    
   </head>
   <body>
     <div id="root"></div>

@@ -1,12 +1,12 @@
 /**
  * ProjectSorter.tsx
  * ---------------------------------------------------------------------------
- * 一个具有层级视觉衰减效果的静态项目清单组件。
+ * 层级项目清单组件，强调透明度递进形成的纵深感。
  *
- * [调整记录]
- * 1. 布局重构：改为 Flex-col 布局，工具栏固定顶部，列表独立滚动，彻底解决穿透问题。
- * 2. 尺寸锁定：容器强制锁定为 400px * 300px。
- * 3. 紧凑化：针对小窗口优化了 Padding 和间距。
+ * [变更要点]
+ * 1. 布局：采用纵向 Flex，顶部工具条固定，列表独立滚动避免穿透。
+ * 2. 尺寸：容器约束在 350px × 450px，方便嵌入演示。
+ * 3. 紧凑：针对窄视窗压缩内边距与间距。
  */
 
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
@@ -133,8 +133,8 @@ const DEFAULT_SETTINGS: { enableOpacity: boolean; opacityMode: OpacityMode } = {
 const MAX_TITLE_LENGTH = 36;
 const MAX_DEPTH = 5;
 
-// --- ID Helpers ---
-const generateId = (): string => Math.random().toString(36).substr(2, 9);
+// --- ID 工具集 ---
+const generateId = (): string => Math.random().toString(36).slice(2, 11);
 const generateUniqueId = (used: Set<string>): string => {
   let next = generateId();
   while (used.has(next)) next = generateId();
@@ -164,8 +164,6 @@ const normalizeTreeIds = (nodes: TreeItem[]): { tree: TreeItem[]; usedIds: Set<s
     });
   return { tree: walk(nodes), usedIds, changed };
 };
-
-const isOpacityMode = (value: unknown): value is OpacityMode => [1, 2, 3].includes(value as number);
 
 const getNodeMaxDepth = (node: TreeItem): number =>
   1 + (node.children.length ? Math.max(...node.children.map(getNodeMaxDepth)) : 0);
@@ -255,7 +253,7 @@ const moveNodeInTree = (data: TreeItem[], dragId: string, targetId: string, posi
   return newData;
 };
 
-// --- ProjectSorter ---
+// --- ProjectSorter 主界面 ---
 
 const ProjectSorter: FC = () => {
   const [data, setData] = useState<TreeItem[]>([]);
@@ -280,7 +278,7 @@ const ProjectSorter: FC = () => {
       };
   }, []);
 
-  // 初始化逻辑 (与之前相同，省略重复细节以保持专注)
+  // 初始化：流程复用旧逻辑，这里仅保留关键步骤注解
   useEffect(() => {
     const saved = localStorage.getItem(DATA_STORAGE_KEY);
     if (saved) {
@@ -503,7 +501,7 @@ const ProjectSorter: FC = () => {
   const handleListDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     if (!listRef.current) return;
     const related = e.relatedTarget as Node | null;
-    if (!related) return; // 由全局 dragover 负责边缘滚动
+    if (!related) return; // 边缘滚动逻辑由全局 dragover 统一处理
     if (!listRef.current.contains(related)) updateAutoScrollDirection(0);
   }, [updateAutoScrollDirection]);
 
@@ -594,14 +592,25 @@ const ProjectSorter: FC = () => {
         overflow: 'hidden'
       }}
     >
-        {/* --- 1. 固定工具栏区域 (无滚动) --- */}
+        {/* --- 1. 顶部工具条：静止区域 --- */}
         <div
-          className="flex-shrink-0 flex justify-end items-center px-3"
+          className="flex-shrink-0 flex justify-between items-center px-3"
           style={{ height: '50px', marginTop: '8px', marginBottom: '8px'}}
         >
+            {/* 左上角图标 */}
+            <div className="flex items-center" style={{ marginLeft: '12px' }}>
+                <img 
+                    src="/icons.png" 
+                    alt="Plan P" 
+                    className="w-8 h-8 rounded-lg shadow-sm"
+                    style={{ objectFit: 'contain' }}
+                />
+            </div>
+
+            {/* 右侧工具栏 */}
             <div className="flex items-center gap-1.5 p-1 bg-white/70 backdrop-blur-xl rounded-full border border-white/50 shadow-sm shadow-slate-200/40 hover:bg-white/80 transition-all">
                 
-                {/* 视图设置 */}
+                {/* 视图控制组合 */}
                 <div className="flex items-center bg-slate-100/60 rounded-full p-0.5 border border-slate-200/50">
                     <button
                         onClick={() => setEnableOpacity(!enableOpacity)}
@@ -628,7 +637,7 @@ const ProjectSorter: FC = () => {
 
                 <div className="w-px h-3 bg-slate-300/50 mx-0.5" />
 
-                {/* 核心操作 */}
+                {/* 主操作按钮 */}
                 <div className="flex items-center gap-1">
                     {data.length > 0 && (
                         <button 
@@ -650,7 +659,7 @@ const ProjectSorter: FC = () => {
             </div>
         </div>
 
-        {/* --- 2. 滚动列表区域 (独立滚动，不与工具栏重叠) --- */}
+        {/* --- 2. 列表主体：独立滚动 --- */}
         <div
           ref={listRef}
           className="flex-1 overflow-y-auto px-4 pt-3 pb-4 no-scrollbar relative"
@@ -682,7 +691,7 @@ const ProjectSorter: FC = () => {
           )}
         </div>
 
-        {/* --- 弹窗 --- */}
+        {/* --- 弹窗层 --- */}
         {showClearAllConfirm && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-slate-900/20 backdrop-blur-sm" onClick={() => setShowClearAllConfirm(false)} />
