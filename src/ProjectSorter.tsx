@@ -587,8 +587,8 @@ const ProjectSorter: FC = () => {
     <div
       className="bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-[#F0F4FF] via-white to-[#E6F0FF] text-slate-800 font-sans selection:bg-[#D4E3FD]"
       style={{ 
-        width: '400px',
-        height: '500px',
+        width: '350px',
+        height: '450px',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden'
@@ -653,7 +653,7 @@ const ProjectSorter: FC = () => {
         {/* --- 2. 滚动列表区域 (独立滚动，不与工具栏重叠) --- */}
         <div
           ref={listRef}
-          className="flex-1 overflow-y-auto px-4 pb-4 no-scrollbar relative"
+          className="flex-1 overflow-y-auto px-4 pt-3 pb-4 no-scrollbar relative"
           onDragOver={handleListDragOver}
           onDragLeave={handleListDragLeave}
           onDrop={handleListDrop}
