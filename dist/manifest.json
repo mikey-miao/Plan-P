@@ -2,16 +2,10 @@
   "manifest_version": 3,
   "name": "Project Sorter",
   "version": "1.0.0",
-  "description": "层级项目列表，以渐进透明度展示优先级，支持键盘和拖拽排序。",
+  "description": "A lightweight hierarchical project list with drag-and-drop sorting.",
   "action": {
-    "default_title": "Project Sorter",
     "default_popup": "index.html"
   },
-  "icons": {
-    "16": "icons/icon-16.png",
-    "48": "icons/icon-48.png",
-    "128": "icons/icon-128.png"
-  },
-  "permissions": [],
-  "host_permissions": []
+  "permissions": ["storage"]
 }
+

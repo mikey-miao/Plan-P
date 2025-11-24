@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ProjectSorter.tsx
  * ---------------------------------------------------------------------------
  * 一个具有层级视觉衰减效果的静态项目清单组件。
@@ -9,8 +9,9 @@
  * 3. 紧凑化：针对小窗口优化了 Padding 和间距。
  */
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import type { CSSProperties, FC } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
+import type { FC, CSSProperties, RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   ChevronRight, 
   ChevronDown, 
@@ -22,23 +23,14 @@ import {
   Check
 } from 'lucide-react';
 
-const PROJECTS_FILE_PATH = 'projects.xml';
-const SETTINGS_FILE_PATH = 'project-settings.json';
 const DATA_STORAGE_KEY = 'project-sort-data-v37';
 const SETTINGS_STORAGE_KEY = 'project-sort-settings-v2';
 const MIN_NODE_WIDTH = 180;
 
-const resolveAssetUrl = (path: string): string => {
-  const runtime = (globalThis as any)?.chrome?.runtime;
-  if (runtime?.getURL) {
-    return runtime.getURL(path);
-  }
-  return path;
-};
-
 type MoveDirection = 'up' | 'down' | 'left' | 'right';
 type OpacityMode = 1 | 2 | 3;
 type InsertPosition = 'before' | 'after' | 'inside';
+type ScrollDirection = -1 | 0 | 1;
 
 const TRANSPARENT_DRAG_IMAGE = (() => {
   if (typeof Image === 'undefined') return null;
@@ -72,8 +64,10 @@ interface TreeNodeProps {
   deletingAncestor: boolean;
   selectedId: string | null;
   draggingId: string | null;
+  lengthWarningId: string | null;
+  lengthWarningExcess: number | null;
   onToggle: (id: string) => void;
-  onAdd: (parentId: string | null) => void;
+  onAdd: (parentId: string | null, level: number) => void;
   onDeleteRequest: (id: string) => void;
   onConfirmDelete: (id: string) => void;
   onRename: (id: string, newTitle: string) => void;
@@ -86,29 +80,48 @@ interface TreeNodeProps {
 
 const FALLBACK_DATA: TreeItem[] = [
   {
-    id: 'study',
-    title: '学习路线',
+    id: 'launch-plan',
+    title: '项目启动',
     isOpen: true,
     children: [
       {
-        id: 'writing',
-        title: '写作练习',
+        id: 'scope-define',
+        title: '范围梳理',
         isOpen: true,
         children: [
-          { id: 'daily-words', title: '每日词汇', children: [] },
-          { id: 'shadowing', title: '句子跟读', children: [] }
+          { id: 'stakeholder-sync', title: '干系人同步', isOpen: true, children: [] }
         ]
-      },
-      { id: 'reading', title: '阅读计划', children: [] }
+      }
     ]
   },
   {
-    id: 'work',
-    title: '工作项目',
+    id: 'mid-review',
+    title: '中期评审',
     isOpen: true,
     children: [
-      { id: 'q3-plan', title: 'Q3 规划稿', children: [] },
-      { id: 'weekly', title: '周报整理', children: [] }
+      {
+        id: 'draft-output',
+        title: '方案初稿',
+        isOpen: true,
+        children: [
+          { id: 'risk-check', title: '风险检查', isOpen: true, children: [] }
+        ]
+      }
+    ]
+  },
+  {
+    id: 'release-track',
+    title: '发布跟踪',
+    isOpen: true,
+    children: [
+      {
+        id: 'test-pass',
+        title: '测试验证',
+        isOpen: true,
+        children: [
+          { id: 'rollback-ready', title: '回滚预案确认', isOpen: true, children: [] }
+        ]
+      }
     ]
   }
 ];
@@ -117,6 +130,8 @@ const DEFAULT_SETTINGS: { enableOpacity: boolean; opacityMode: OpacityMode } = {
   enableOpacity: true,
   opacityMode: 2
 };
+const MAX_TITLE_LENGTH = 36;
+const MAX_DEPTH = 5;
 
 // --- ID Helpers ---
 const generateId = (): string => Math.random().toString(36).substr(2, 9);
@@ -152,29 +167,43 @@ const normalizeTreeIds = (nodes: TreeItem[]): { tree: TreeItem[]; usedIds: Set<s
 
 const isOpacityMode = (value: unknown): value is OpacityMode => [1, 2, 3].includes(value as number);
 
-const parseProjectsXml = (xmlText: string): TreeItem[] | null => {
-  if (typeof DOMParser === 'undefined') return null;
-  try {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlText, 'application/xml');
-    if (doc.querySelector('parsererror')) return null;
-    const root = doc.querySelector('projects');
-    if (!root) return null;
-    const parseNode = (el: Element): TreeItem => {
-      const isOpenAttr = el.getAttribute('isOpen');
-      return {
-        id: el.getAttribute('id') || generateId(),
-        title: el.getAttribute('title') || '未命名节点',
-        isOpen: isOpenAttr === null ? true : isOpenAttr !== 'false',
-        children: Array.from(el.children).filter(c => c.tagName.toLowerCase() === 'node').map(c => parseNode(c as Element))
-      };
-    };
-    const nodes = Array.from(root.children).filter(c => c.tagName.toLowerCase() === 'node').map(c => parseNode(c as Element));
-    return normalizeTreeIds(nodes).tree;
-  } catch (e) {
-    return null;
+const getNodeMaxDepth = (node: TreeItem): number =>
+  1 + (node.children.length ? Math.max(...node.children.map(getNodeMaxDepth)) : 0);
+
+interface TreeContextWithDepth extends TreeContext {
+  depth: number;
+}
+
+const findContextByIdWithDepth = (
+  nodes: TreeItem[],
+  targetId: string,
+  depth = 0,
+  parent: TreeItem | null = null
+): TreeContextWithDepth | null => {
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].id === targetId) return { list: nodes, index: i, node: nodes[i], parent, depth };
+    if (nodes[i].children) {
+      const res = findContextByIdWithDepth(nodes[i].children, targetId, depth + 1, nodes[i]);
+      if (res) return res;
+    }
   }
+  return null;
 };
+
+const getTitleStyle = (selected: boolean): CSSProperties =>
+  selected
+    ? {
+        whiteSpace: 'normal',
+        overflow: 'visible',
+        display: 'block'
+      }
+    : {
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      };
+const formatTitle = (title: string, selected: boolean): string =>
+  selected || title.length <= MAX_TITLE_LENGTH ? title : `${title.slice(0, MAX_TITLE_LENGTH)}…`;
 
 const findContextById = (nodes: TreeItem[], targetId: string, parent: TreeItem | null = null): TreeContext | null => {
   for (let i = 0; i < nodes.length; i++) {
@@ -189,6 +218,16 @@ const findContextById = (nodes: TreeItem[], targetId: string, parent: TreeItem |
 const containsId = (node: TreeItem, targetId: string): boolean => {
   if (node.id === targetId) return true;
   return node.children?.some(child => containsId(child, targetId)) ?? false;
+};
+
+const canPlaceNode = (tree: TreeItem[], dragId: string, targetId: string, position: InsertPosition): boolean => {
+  const dragCtx = findContextByIdWithDepth(tree, dragId);
+  const targetCtx = findContextByIdWithDepth(tree, targetId);
+  if (!dragCtx || !targetCtx) return false;
+  const dragHeight = getNodeMaxDepth(dragCtx.node);
+  let baseDepth = targetCtx.depth;
+  if (position === 'inside') baseDepth = targetCtx.depth + 1;
+  return baseDepth + dragHeight - 1 < MAX_DEPTH;
 };
 
 const moveNodeInTree = (data: TreeItem[], dragId: string, targetId: string, position: InsertPosition): TreeItem[] | null => {
@@ -226,9 +265,20 @@ const ProjectSorter: FC = () => {
   const [enableOpacity, setEnableOpacity] = useState(DEFAULT_SETTINGS.enableOpacity);
   const [opacityMode, setOpacityMode] = useState<OpacityMode>(DEFAULT_SETTINGS.opacityMode);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [lengthWarning, setLengthWarning] = useState<{ id: string; excess: number } | null>(null);
   const lastWheelTime = useRef<number>(0);
   const dataInitializedRef = useRef(false);
   const settingsInitializedRef = useRef(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const autoScrollDirectionRef = useRef<ScrollDirection>(0);
+  const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+      return () => {
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+      };
+  }, []);
 
   // 初始化逻辑 (与之前相同，省略重复细节以保持专注)
   useEffect(() => {
@@ -243,22 +293,8 @@ const ProjectSorter: FC = () => {
         }
       } catch (e) {}
     }
-    const loadFromXml = async () => {
-      try {
-        const res = await fetch(resolveAssetUrl(PROJECTS_FILE_PATH));
-        if (res.ok) {
-          const parsed = parseProjectsXml(await res.text());
-          if (parsed?.length) {
-            setData(parsed);
-            dataInitializedRef.current = true;
-            return;
-          }
-        }
-      } catch (e) {}
-      setData(FALLBACK_DATA);
-      dataInitializedRef.current = true;
-    };
-    loadFromXml();
+    setData(FALLBACK_DATA);
+    dataInitializedRef.current = true;
   }, []);
 
   useEffect(() => {
@@ -276,11 +312,9 @@ const ProjectSorter: FC = () => {
             return;
         } catch(e){}
     }
-    fetch(resolveAssetUrl(SETTINGS_FILE_PATH)).then(r=>r.json()).then(p=>{
-        setEnableOpacity(p.enableOpacity ?? true);
-        setOpacityMode(p.opacityMode ?? 2);
-    }).catch(()=>{})
-    .finally(()=> settingsInitializedRef.current = true);
+    setEnableOpacity(DEFAULT_SETTINGS.enableOpacity);
+    setOpacityMode(DEFAULT_SETTINGS.opacityMode);
+    settingsInitializedRef.current = true;
   }, []);
 
   useEffect(() => {
@@ -307,16 +341,24 @@ const ProjectSorter: FC = () => {
     if (!selectedId) return;
     setData(prev => {
         const newData = JSON.parse(JSON.stringify(prev));
-        const ctx = findContextById(newData, selectedId);
+        const ctx = findContextByIdWithDepth(newData, selectedId);
         if (!ctx) return prev;
-        const { list, index, node, parent } = ctx;
+        const { list, index, node, depth } = ctx;
+        const parent = ctx.parent;
+        const nodeHeight = getNodeMaxDepth(node);
         if (dir === 'up' && index > 0) [list[index], list[index-1]] = [list[index-1], list[index]];
         else if (dir === 'down' && index < list.length - 1) [list[index], list[index+1]] = [list[index+1], list[index]];
         else if (dir === 'right' && index < list.length - 1) {
+            const sibling = list[index + 1];
+            if (!sibling) return prev;
+            const parentCtx = findContextByIdWithDepth(newData, sibling.id);
+            if (!parentCtx) return prev;
+            const baseDepth = parentCtx.depth + 1;
+            if (baseDepth + nodeHeight - 1 >= MAX_DEPTH) return prev;
             list.splice(index, 1);
-            if (!list[index].children) list[index].children = [];
-            list[index].children.unshift(node);
-            list[index].isOpen = true;
+            if (!parentCtx.node.children) parentCtx.node.children = [];
+            parentCtx.node.children.unshift(node);
+            parentCtx.node.isOpen = true;
         }
         else if (dir === 'left' && parent) {
             const pCtx = findContextById(newData, parent.id);
@@ -356,7 +398,9 @@ const ProjectSorter: FC = () => {
     return rec(prev);
   });
 
-  const handleAdd = (parentId: string | null) => {
+  const handleAdd = (parentId: string | null, parentLevel: number) => {
+    if (parentId && parentLevel >= MAX_DEPTH - 1) return;
+    setSelectedId(null);
     setData(prev => {
         const u = collectIds(prev);
         const n: TreeItem = { id: generateUniqueId(u), title: '新项目', isOpen: true, children: [] };
@@ -370,6 +414,29 @@ const ProjectSorter: FC = () => {
   const handleDeleteRequest = (id: string) => {
     if (findContextById(data, id)?.node.children.length) setDeleteConfirmId(id);
     else confirmDelete(id);
+  };
+
+  const triggerLengthWarning = (id: string, excess: number) => {
+    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    setLengthWarning({ id, excess });
+    warningTimerRef.current = setTimeout(() => {
+      setLengthWarning(prev => (prev?.id === id ? null : prev));
+    }, 2000);
+  };
+
+  const handleRename = (id: string, newTitle: string) => {
+    const rawTitle = newTitle.trim() || '未命名节点';
+    const sanitizedTitle = rawTitle.slice(0, MAX_TITLE_LENGTH);
+    setData(prev => {
+      const rec = (nodes: TreeItem[]): TreeItem[] =>
+        nodes.map(node =>
+          node.id === id ? { ...node, title: sanitizedTitle } : { ...node, children: rec(node.children) }
+        );
+      return rec(prev);
+    });
+    const excess = Math.max(0, rawTitle.length - MAX_TITLE_LENGTH);
+    if (excess > 0) triggerLengthWarning(id, excess);
+    else if (lengthWarning?.id === id) setLengthWarning(null);
   };
 
   const handleClearAll = () => {
@@ -387,21 +454,140 @@ const ProjectSorter: FC = () => {
     if (selectedId === id) setSelectedId(null);
   };
 
-  const handleDragStart = (id: string) => setDraggingId(id);
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollFrameRef.current) {
+      cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
+    autoScrollDirectionRef.current = 0;
+  }, []);
+
+  const ensureAutoScrollLoop = useCallback(() => {
+    if (autoScrollFrameRef.current) return;
+    const step = () => {
+      if (!autoScrollDirectionRef.current || !listRef.current) {
+        stopAutoScroll();
+        return;
+      }
+      listRef.current.scrollBy({ top: autoScrollDirectionRef.current * 4, behavior: 'auto' });
+      autoScrollFrameRef.current = requestAnimationFrame(step);
+    };
+    autoScrollFrameRef.current = requestAnimationFrame(step);
+  }, [stopAutoScroll]);
+
+  const updateAutoScrollDirection = useCallback((dir: ScrollDirection) => {
+    if (autoScrollDirectionRef.current === dir) return;
+    autoScrollDirectionRef.current = dir;
+    if (dir === 0) stopAutoScroll();
+    else ensureAutoScrollLoop();
+  }, [ensureAutoScrollLoop, stopAutoScroll]);
+
+  const DEAD_ZONE_RATIO = 0.8;
+
+  const computeScrollDirection = useCallback((clientY: number): ScrollDirection => {
+    if (!listRef.current) return 0;
+    const rect = listRef.current.getBoundingClientRect();
+    const padding = rect.height * (1 - DEAD_ZONE_RATIO) / 2;
+    const deadZoneTop = rect.top + padding;
+    const deadZoneBottom = rect.bottom - padding;
+    if (clientY >= deadZoneTop && clientY <= deadZoneBottom) return 0;
+    return clientY < deadZoneTop ? -1 : 1;
+  }, []);
+
+  const handleListDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!draggingId || !listRef.current) return;
+    e.preventDefault();
+    updateAutoScrollDirection(computeScrollDirection(e.clientY));
+  }, [draggingId, computeScrollDirection, updateAutoScrollDirection]);
+
+  const handleListDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!listRef.current) return;
+    const related = e.relatedTarget as Node | null;
+    if (!related) return; // 由全局 dragover 负责边缘滚动
+    if (!listRef.current.contains(related)) updateAutoScrollDirection(0);
+  }, [updateAutoScrollDirection]);
+
+  const handleListDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    updateAutoScrollDirection(0);
+    stopAutoScroll();
+    setDraggingId(null);
+    setSelectedId(null);
+  }, [stopAutoScroll, updateAutoScrollDirection]);
+
+  const handleDragStart = (id: string) => {
+    setDraggingId(id);
+    setSelectedId(null);
+  };
   const handleDropOn = (tid: string, pos: InsertPosition) => {
     if (!draggingId || draggingId === tid) return;
-    setData(p => moveNodeInTree(p, draggingId, tid, pos) || p);
-    setSelectedId(draggingId); setDraggingId(null);
+    setData(prev => {
+      if (!canPlaceNode(prev, draggingId, tid, pos)) return prev;
+      return moveNodeInTree(prev, draggingId, tid, pos) || prev;
+    });
+    setDraggingId(null);
+    setSelectedId(null);
+    stopAutoScroll();
   };
   const handlePreviewMove = (tid: string, pos: InsertPosition) => {
-    if (draggingId && draggingId !== tid) setData(p => moveNodeInTree(p, draggingId, tid, pos) || p);
+    if (draggingId && draggingId !== tid) {
+      setData(prev => {
+        if (!canPlaceNode(prev, draggingId, tid, pos)) return prev;
+        return moveNodeInTree(prev, draggingId, tid, pos) || prev;
+      });
+    }
   };
+  const handleDragEnd = useCallback(() => {
+    setDraggingId(null);
+    setSelectedId(null);
+    stopAutoScroll();
+  }, [stopAutoScroll]);
+
+  useEffect(() => {
+    if (!draggingId) return;
+    const handleWindowDragOver = (event: DragEvent) => {
+      if (!listRef.current) return;
+      event.preventDefault();
+      updateAutoScrollDirection(computeScrollDirection(event.clientY));
+    };
+    const handleWindowDrop = (event: DragEvent) => {
+      const targetNode = event.target as Node | null;
+      const insideList = !!(targetNode && listRef.current?.contains(targetNode));
+      if (!insideList) {
+        setSelectedId(null);
+        setDraggingId(null);
+        updateAutoScrollDirection(0);
+        stopAutoScroll();
+      }
+    };
+    window.addEventListener('dragover', handleWindowDragOver);
+    window.addEventListener('drop', handleWindowDrop);
+    window.addEventListener('dragend', handleWindowDrop);
+    return () => {
+      window.removeEventListener('dragover', handleWindowDragOver);
+      window.removeEventListener('drop', handleWindowDrop);
+      window.removeEventListener('dragend', handleWindowDrop);
+      updateAutoScrollDirection(0);
+      stopAutoScroll();
+    };
+  }, [draggingId, updateAutoScrollDirection, stopAutoScroll, computeScrollDirection]);
+
+  useEffect(() => {
+    if (!draggingId) return;
+    const handleWheelWhileDragging = (event: WheelEvent) => {
+      if (!listRef.current) return;
+      event.preventDefault();
+      listRef.current.scrollBy({ top: event.deltaY, behavior: 'auto' });
+    };
+    window.addEventListener('wheel', handleWheelWhileDragging, { passive: false });
+    return () => window.removeEventListener('wheel', handleWheelWhileDragging);
+  }, [draggingId]);
 
   return (
     <div
       className="bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-[#F0F4FF] via-white to-[#E6F0FF] text-slate-800 font-sans selection:bg-[#D4E3FD]"
       style={{ 
-        width: '300px',
+        width: '400px',
         height: '500px',
         display: 'flex',
         flexDirection: 'column',
@@ -454,7 +640,7 @@ const ProjectSorter: FC = () => {
                         </button>
                     )}
                     <button 
-                        onClick={() => handleAdd(null)}
+                        onClick={() => handleAdd(null, -1)}
                         className="w-10 h-10 flex items-center justify-center bg-slate-800 hover:bg-slate-900 text-white rounded-full shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all active:scale-95"
                         title="新建项目"
                     >
@@ -465,7 +651,13 @@ const ProjectSorter: FC = () => {
         </div>
 
         {/* --- 2. 滚动列表区域 (独立滚动，不与工具栏重叠) --- */}
-        <div className="flex-1 overflow-y-auto px-4 pb-4 no-scrollbar relative">
+        <div
+          ref={listRef}
+          className="flex-1 overflow-y-auto px-4 pb-4 no-scrollbar relative"
+          onDragOver={handleListDragOver}
+          onDragLeave={handleListDragLeave}
+          onDrop={handleListDrop}
+        >
           {data.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-white/40 rounded-2xl bg-white/10 backdrop-blur-sm mx-4">
               <p className="text-slate-400 mb-2 text-sm font-bold">暂无内容</p>
@@ -478,13 +670,12 @@ const ProjectSorter: FC = () => {
                   item={item} index={index} level={0}
                   parentOpacity={1} enableOpacity={enableOpacity} opacityMode={opacityMode}
                   deleteConfirmId={deleteConfirmId} deletingAncestor={false} selectedId={selectedId} draggingId={draggingId}
+                  lengthWarningId={lengthWarning?.id ?? null}
+                  lengthWarningExcess={lengthWarning?.excess ?? null}
                   onToggle={toggleOpen} onAdd={handleAdd} onDeleteRequest={handleDeleteRequest}
-                  onConfirmDelete={confirmDelete} onRename={(id, t) => setData(p => {
-                      const rec = (ns:TreeItem[]):TreeItem[] => ns.map(n=>n.id===id?{...n,title:t}:{...n,children:rec(n.children)});
-                      return rec(p);
-                  })}
+                  onConfirmDelete={confirmDelete} onRename={handleRename}
                   onSelect={id => setSelectedId(id===selectedId?null:id)}
-                  onDragStart={handleDragStart} onDrop={handleDropOn} onPreviewMove={handlePreviewMove} onDragEnd={() => setDraggingId(null)}
+                  onDragStart={handleDragStart} onDrop={handleDropOn} onPreviewMove={handlePreviewMove} onDragEnd={handleDragEnd}
                 />
               ))}
             </ul>
@@ -511,18 +702,32 @@ const ProjectSorter: FC = () => {
 const TreeNode: FC<TreeNodeProps> = ({ 
   item, index, level, parentOpacity, 
   enableOpacity, opacityMode, deleteConfirmId, deletingAncestor, selectedId, draggingId,
+  lengthWarningId, lengthWarningExcess,
   onToggle, onAdd, onDeleteRequest, onConfirmDelete, onRename, onSelect,
   onDragStart, onDrop, onPreviewMove, onDragEnd
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(item.title);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const childListRef = useRef<HTMLUListElement>(null);
   const centerHoverStartRef = useRef<number|null>(null);
+  const deleteBtnRef = useRef<HTMLButtonElement>(null);
 
   const isSelected = selectedId === item.id;
+  const isActive = isSelected || draggingId === item.id;
   useEffect(() => { if (isEditing && inputRef.current) inputRef.current.focus(); }, [isEditing]);
+  useEffect(() => {
+    if (!isEditing) setEditTitle(item.title);
+  }, [item.title, isEditing]);
+
+  useEffect(() => {
+    if (isEditing && inputRef.current instanceof HTMLTextAreaElement) {
+      const el = inputRef.current;
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+    }
+  }, [editTitle, isEditing]);
 
   const saveEdit = () => { if (editTitle.trim()) onRename(item.id, editTitle); else setEditTitle(item.title); setIsEditing(false); };
   
@@ -532,19 +737,18 @@ const TreeNode: FC<TreeNodeProps> = ({
     else if (opacityMode === 2) localOpacity = index === 0 ? 1 : (index === 1 ? 0.5 : 0.01);
     else if (opacityMode === 3) localOpacity = index === 0 ? 1 : (index === 1 ? 0.5 : (index === 2 ? 0.15 : 0.01));
   }
-  const currentOpacity = isSelected ? 1 : parentOpacity * Math.max(0.01, localOpacity);
+  const currentOpacity = parentOpacity * Math.max(0.01, localOpacity);
 
   const isDeleting = deletingAncestor || deleteConfirmId === item.id;
-  const containerClass = isSelected
-    ? `group relative flex items-center gap-2 bg-[#D4E3FD] border-2 border-[#7BA7F7] shadow-md text-slate-800 rounded-full px-3 py-1.5 cursor-pointer z-10 hover:!opacity-100`
-    : (isDeleting 
-        ? `relative flex items-center gap-2 bg-red-50/80 border border-red-200 shadow-sm text-red-700 rounded-full px-3 py-1.5 cursor-pointer hover:!opacity-100`
-        : `group relative flex items-center gap-2 bg-white/40 border border-white/60 shadow-sm text-slate-700 rounded-full px-3 py-1.5 hover:bg-white/80 cursor-pointer hover:!opacity-100 hover:shadow-md hover:border-white transition-all duration-300 ${draggingId === item.id ? 'ring-2 ring-[#5B8DEF]/40' : ''}`);
+  const baseContainerClass = `group relative flex items-center gap-2 bg-white/40 border border-white/60 shadow-sm text-slate-700 rounded-full px-3 py-1.5 hover:bg-white/80 cursor-pointer hover:!opacity-100 hover:shadow-md hover:border-white transition-all duration-300`;
+  const containerClass = isDeleting 
+    ? `relative flex items-center gap-2 bg-red-50/80 border border-red-200 shadow-sm text-red-700 rounded-full px-3 py-1.5 cursor-pointer hover:!opacity-100`
+    : `${baseContainerClass} ${isActive ? 'ring-2 ring-[#5B8DEF]/40' : ''}`;
 
   return (
     <li 
       className="select-none transition-all duration-300 ease-in-out project-item" 
-      style={{ paddingLeft: level > 0 ? '1.5rem' : '0', zIndex: 50 - level * 5 - index }}
+      style={{ paddingLeft: level > 0 ? '0.5rem' : '0', zIndex: 50 - level * 5 - index }}
       draggable={!isEditing} 
       onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', item.id); if(TRANSPARENT_DRAG_IMAGE) e.dataTransfer.setDragImage(TRANSPARENT_DRAG_IMAGE,0,0); onDragStart(item.id); }}
       onDragOver={(e) => {
@@ -554,7 +758,7 @@ const TreeNode: FC<TreeNodeProps> = ({
             const rect = (headerRef.current ?? e.currentTarget).getBoundingClientRect();
             const y = e.clientY, top = rect.top, h = rect.height;
             let pos: InsertPosition = 'inside';
-            if (y >= top + h * 0.4 && y <= top + h * 0.8) {
+            if (y >= top + h * 0.2 && y <= top + h * 0.8) {
                 if (!centerHoverStartRef.current) centerHoverStartRef.current = Date.now();
                 if (Date.now() - centerHoverStartRef.current < 500) pos = y < top + h/2 ? 'before' : 'after';
             } else { centerHoverStartRef.current = null; pos = y < top + h * 0.4 ? 'before' : 'after'; }
@@ -576,39 +780,79 @@ const TreeNode: FC<TreeNodeProps> = ({
     >
       <div 
         className={containerClass}
-        style={{ opacity: currentOpacity, transition: 'all 0.3s ease', animation: draggingId ? 'drag-slide 0.32s' : undefined, transform: isSelected ? 'scale(1.01) translateX(2px)' : 'scale(1)', minWidth: MIN_NODE_WIDTH }}
+        style={{ opacity: currentOpacity, transition: 'all 0.3s ease', animation: draggingId ? 'drag-slide 0.32s' : undefined, minWidth: MIN_NODE_WIDTH }}
         ref={headerRef}
         onClick={(e) => { e.stopPropagation(); onSelect(item.id); }}
       >
-        <div className={`flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full cursor-pointer transition-all ${isSelected ? 'text-[#5B8DEF]' : 'hover:bg-black/5 text-slate-500'}`} onClick={(e) => { e.stopPropagation(); onToggle(item.id); }}>
+        <div className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full cursor-pointer transition-all hover:bg-black/5 text-slate-500" onClick={(e) => { e.stopPropagation(); onToggle(item.id); }}>
            {item.children?.length ? (item.isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <Circle size={4} className="fill-current opacity-40 stroke-none" />}
         </div>
-        <div className="flex-1 truncate flex items-baseline mr-1">
+        <div className="flex-1 min-w-0 flex items-baseline mr-1">
           {isEditing ? (
-            <input ref={inputRef} value={editTitle} onChange={e => setEditTitle(e.target.value)} onBlur={saveEdit} onKeyDown={e => {if(e.key==='Enter') saveEdit(); if(e.key==='Escape'){setEditTitle(item.title);setIsEditing(false);}}} className={`w-full bg-transparent border-b px-1 text-sm focus:outline-none ${isSelected ? 'border-[#5B8DEF]/50 text-slate-900' : 'border-slate-400/50'}`} onClick={e => e.stopPropagation()} />
+            <textarea
+              ref={inputRef as RefObject<HTMLTextAreaElement>}
+              value={editTitle}
+              onChange={e => setEditTitle(e.target.value)}
+              onBlur={saveEdit}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  saveEdit();
+                }
+                if (e.key === 'Escape') {
+                  setEditTitle(item.title);
+                  setIsEditing(false);
+                }
+              }}
+              className="w-full bg-transparent border border-slate-400/50 rounded px-2 py-1 text-sm focus:outline-none resize-none leading-relaxed"
+              style={{ whiteSpace: 'pre-wrap', overflow: 'hidden' }}
+              onClick={e => e.stopPropagation()}
+            />
           ) : (
-            <span onClick={e => e.stopPropagation()} onDoubleClick={e => { e.stopPropagation(); setIsEditing(true); }} className="cursor-text hover:opacity-70 transition-opacity block w-full truncate text-sm" title={item.title}>{item.title}</span>
+            <span
+              onClick={(e) => { e.stopPropagation(); onSelect(item.id); }}
+              onDoubleClick={e => { e.stopPropagation(); setIsEditing(true); }}
+              className="cursor-text hover:opacity-70 transition-opacity block w-full text-sm"
+              style={getTitleStyle(isSelected)}
+              title={item.title}
+            >
+              {formatTitle(item.title, isSelected)}
+            </span>
           )}
         </div>
+        {lengthWarningId === item.id && lengthWarningExcess !== null && (
+          <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-red-100 text-red-600 text-[11px] font-medium px-2 py-0.5 rounded-full border border-red-200 shadow-sm animate-in fade-in duration-200">
+            超出了{lengthWarningExcess}字
+          </div>
+        )}
         <div className={`flex items-center gap-0.5 ${deleteConfirmId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-all duration-200 delete-action-area relative`}>
-          <button onClick={e => { e.stopPropagation(); onAdd(item.id); }} className={`p-1 rounded-full transition-all ${isSelected ? 'hover:bg-[#5B8DEF]/20 text-[#5B8DEF]' : 'hover:bg-black/5'}`}><Plus size={14} /></button>
+          <button
+            onClick={e => { e.stopPropagation(); onAdd(item.id, level); }}
+            disabled={level >= MAX_DEPTH - 1}
+            className={`p-1 rounded-full transition-all ${level >= MAX_DEPTH - 1 ? 'text-slate-300 cursor-not-allowed' : 'hover:bg-black/5'}`}
+            title={level >= MAX_DEPTH - 1 ? '最多 5 层，无法再添加子节点' : '添加子节点'}
+          >
+            <Plus size={14} />
+          </button>
           <div className="relative">
-             <button onClick={e => { e.stopPropagation(); onDeleteRequest(item.id); }} className={`p-1 rounded-full transition-all ${deleteConfirmId === item.id ? 'bg-red-500 text-white' : 'hover:bg-red-500/10 hover:text-red-600'}`}><Trash2 size={14} /></button>
-              {deleteConfirmId === item.id && (
-                <div className="absolute bottom-full mb-1 right-0 w-24 bg-white rounded-lg shadow-xl border border-slate-100 p-1.5 z-10 animate-in slide-in-from-bottom-2 duration-200 text-slate-800" style={{ zIndex:"1000"}} onClick={e => e.stopPropagation()}>
-                   <button
-                     onClick={e => { e.stopPropagation(); onConfirmDelete(item.id); }}
-                     className="w-full bg-red-500 hover:bg-red-600 text-white text-[10px] font-bold py-1 rounded flex justify-center items-center"
-                   >
-                     删除全部任务
-                   </button>
-                </div>
+             <button
+               ref={deleteBtnRef}
+               onClick={e => { e.stopPropagation(); onDeleteRequest(item.id); }}
+               className={`p-1 rounded-full transition-all ${deleteConfirmId === item.id ? 'bg-red-500 text-white' : 'hover:bg-red-500/10 hover:text-red-600'}`}
+             >
+               <Trash2 size={14} />
+             </button>
+             {deleteConfirmId === item.id && (
+               <DeleteConfirmPopover
+                 anchorEl={deleteBtnRef.current}
+                 onConfirm={(e) => { e.stopPropagation(); onConfirmDelete(item.id); }}
+               />
              )}
           </div>
         </div>
       </div>
       {item.isOpen && item.children?.length > 0 && (
-        <ul ref={childListRef} className="mt-1.5 space-y-1.5 border-l border-white/20 ml-4 pl-2 relative">
+        <ul ref={childListRef} className="mt-1.5 space-y-1.5 border-l border-white/20 ml-2 pl-1 relative">
             {item.children.map((child, idx) => (
                 <TreeNode
                   key={child.id}
@@ -622,6 +866,8 @@ const TreeNode: FC<TreeNodeProps> = ({
                   deletingAncestor={isDeleting}
                   selectedId={selectedId}
                   draggingId={draggingId}
+                  lengthWarningId={lengthWarningId}
+                  lengthWarningExcess={lengthWarningExcess}
                   onToggle={onToggle}
                   onAdd={onAdd}
                   onDeleteRequest={onDeleteRequest}
@@ -641,3 +887,51 @@ const TreeNode: FC<TreeNodeProps> = ({
 };
 
 export default ProjectSorter;
+
+interface DeleteConfirmPopoverProps {
+  anchorEl: HTMLElement | null;
+  onConfirm: (event: React.MouseEvent) => void;
+}
+
+const DeleteConfirmPopover: FC<DeleteConfirmPopoverProps> = ({ anchorEl, onConfirm }) => {
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!anchorEl) {
+      setPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const rect = anchorEl.getBoundingClientRect();
+      setPosition({
+        top: rect.top - 50,
+        left: rect.right - 96
+      });
+    };
+    updatePosition();
+    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', updatePosition);
+    return () => {
+      window.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('resize', updatePosition);
+    };
+  }, [anchorEl]);
+
+  if (!anchorEl || !position || typeof document === 'undefined') return null;
+
+  return createPortal(
+    <div
+      className="delete-action-area fixed w-24 bg-white rounded-lg shadow-xl border border-slate-100 p-1.5 text-slate-800 animate-in slide-in-from-bottom-2 duration-200"
+      style={{ top: position.top, left: position.left, zIndex: 1000 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        onClick={onConfirm}
+        className="w-full bg-red-500 hover:bg-red-600 text-white text-[10px] font-bold py-1 rounded flex justify-center items-center"
+      >
+        删除全部任务
+      </button>
+    </div>,
+    document.body
+  );
+};

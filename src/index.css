@@ -2,26 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+html,body{
+  margin: 0;
+  padding: 0;
+}
+
 body {
   @apply antialiased;
-  margin: 0;
-  min-height: 0;
-  background-color: #eef2ff;
   color: #0f172a;
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
   overflow: hidden;
 }
 
-html {
-  height: auto;
-  min-height: 0;
-  overflow: hidden;
-  background-color: #eef2ff;
-}
-
 #root {
-  min-height: 200px;
+  width: 400px;
+  height: 500px;
+  margin: 0;
+  padding: 0;
   display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .no-scrollbar {
