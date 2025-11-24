@@ -5,8 +5,30 @@
 body {
   @apply antialiased;
   margin: 0;
-  min-height: 100vh;
-  background-color: #030712;
+  min-height: 0;
+  background-color: #eef2ff;
   color: #0f172a;
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  overflow: hidden;
+}
+
+html {
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+  background-color: #eef2ff;
+}
+
+#root {
+  min-height: 200px;
+  display: flex;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
