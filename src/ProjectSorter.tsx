@@ -136,6 +136,16 @@ const DEFAULT_SETTINGS: { enableOpacity: boolean; opacityMode: OpacityMode } = {
 const MAX_TITLE_LENGTH = 36;
 const PLACEHOLDER_TITLE = '新项目';
 const MAX_DEPTH = 5;
+const TREE_STATE_ICON_PATHS: Record<TreeOpenState, string> = {
+  'all-open': '/icons/Expand.svg',
+  'all-closed': '/icons/Collapse.svg',
+  mixed: '/icons/Random.svg'
+};
+const TREE_STATE_ICON_HOVER_PATHS: Record<TreeOpenState, string> = {
+  'all-open': '/icons/Expand_hover.svg',
+  'all-closed': '/icons/Collapse_hover.svg',
+  mixed: '/icons/Random_hover.svg'
+};
 
 // --- ID 工具集 ---
 const generateId = (): string => Math.random().toString(36).slice(2, 11);
@@ -273,35 +283,26 @@ const getTreeOpenState = (nodes: TreeItem[]): TreeOpenState => {
   return 'all-closed';
 };
 
-const TreeStateIcon: FC<{ state: TreeOpenState }> = ({ state }) => {
-  if (state === 'all-open') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-        <rect x="1.5" y="2" width="9" height="1.2" rx="0.6" fill="currentColor" />
-        <rect x="1.5" y="5.4" width="9" height="1.2" rx="0.6" fill="currentColor" />
-        <rect x="1.5" y="8.8" width="9" height="1.2" rx="0.6" fill="currentColor" />
-      </svg>
-    );
-  }
-  if (state === 'all-closed') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-        <polygon points="4,2 9,6 4,10" fill="currentColor" />
-      </svg>
-    );
-  }
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-      <path
-        d="M2 3c.8-.4 1.6-.4 2.4 0s1.6.4 2.4 0 1.6-.4 2.4 0M2 9c.8-.4 1.6-.4 2.4 0s1.6.4 2.4 0 1.6-.4 2.4 0"
-        stroke="currentColor"
-        strokeWidth="1.1"
-        strokeLinecap="round"
-        fill="none"
-      />
-    </svg>
-  );
-};
+const TreeStateIcon: FC<{ state: TreeOpenState }> = ({ state }) => (
+  <span className="relative inline-flex items-center justify-center">
+    <img
+      src={TREE_STATE_ICON_PATHS[state]}
+      alt={state}
+      width={16}
+      height={16}
+      className="w-4 h-4 group-hover:hidden"
+      draggable={false}
+    />
+    <img
+      src={TREE_STATE_ICON_HOVER_PATHS[state]}
+      alt={`${state}-hover`}
+      width={16}
+      height={16}
+      className="w-4 h-4 hidden group-hover:block"
+      draggable={false}
+    />
+  </span>
+);
 
 const canPlaceNode = (tree: TreeItem[], dragId: string, targetId: string, position: InsertPosition): boolean => {
   const dragCtx = findContextByIdWithDepth(tree, dragId);
@@ -737,7 +738,8 @@ const ProjectSorter: FC = () => {
                 <button
                     onClick={handleToggleAllNodes}
                     disabled={!data.length}
-                    className={`ml-1 w-6 h-6 rounded-full flex items-center justify-center transition-all ${data.length ? 'bg-white text-slate-600 shadow-sm hover:bg-white/80' : 'text-slate-300 cursor-not-allowed bg-white/70'}`}
+                    style={{ width: '28.571px', height: '28.571px' }}
+                    className={`ml-1 rounded-full flex items-center justify-center transition-all group ${data.length ? 'bg-slate-100 text-[#94A3B8] hover:text-black' : 'text-slate-300 cursor-not-allowed bg-slate-100/80'}`}
                     title={treeOpenState === 'all-open' ? '全部收起' : treeOpenState === 'all-closed' ? '全部展开' : '全部展开'}
                 >
                     <TreeStateIcon state={treeOpenState} />
