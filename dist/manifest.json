@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Plan P Project Sorter",
-  "version": "1.0.0",
-  "description": "静态项目清单工具的扩展弹窗页面。",
+  "name": "Plan P",
+  "version": "0.1.0",
+  "description": "P人友好的ToDo List",
   "icons": {
     "16": "icons.png",
     "48": "icons.png",
