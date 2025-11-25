@@ -9,7 +9,7 @@
  * 3. 紧凑：针对窄视窗压缩内边距与间距。
  */
 
-import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
 import type { FC, CSSProperties, RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { 
@@ -31,6 +31,7 @@ type MoveDirection = 'up' | 'down' | 'left' | 'right';
 type OpacityMode = 1 | 2 | 3;
 type InsertPosition = 'before' | 'after' | 'inside';
 type ScrollDirection = -1 | 0 | 1;
+type TreeOpenState = 'all-open' | 'all-closed' | 'mixed';
 
 const TRANSPARENT_DRAG_IMAGE = (() => {
   if (typeof Image === 'undefined') return null;
@@ -66,6 +67,7 @@ interface TreeNodeProps {
   draggingId: string | null;
   lengthWarningId: string | null;
   lengthWarningExcess: number | null;
+  pendingEditId: string | null;
   onToggle: (id: string) => void;
   onAdd: (parentId: string | null, level: number) => void;
   onDeleteRequest: (id: string) => void;
@@ -76,6 +78,7 @@ interface TreeNodeProps {
   onDrop: (id: string, position: InsertPosition) => void;
   onPreviewMove: (id: string, position: InsertPosition) => void;
   onDragEnd: () => void;
+  onResolvePendingEdit: (id: string) => void;
 }
 
 const FALLBACK_DATA: TreeItem[] = [
@@ -131,6 +134,7 @@ const DEFAULT_SETTINGS: { enableOpacity: boolean; opacityMode: OpacityMode } = {
   opacityMode: 2
 };
 const MAX_TITLE_LENGTH = 36;
+const PLACEHOLDER_TITLE = '新项目';
 const MAX_DEPTH = 5;
 
 // --- ID 工具集 ---
@@ -191,17 +195,23 @@ const findContextByIdWithDepth = (
 const getTitleStyle = (selected: boolean): CSSProperties =>
   selected
     ? {
-        whiteSpace: 'normal',
-        overflow: 'visible',
-        display: 'block'
+        whiteSpace: 'pre-wrap',
+        overflow: 'hidden',
+        display: 'block',
+        wordBreak: 'break-word',
+        overflowWrap: 'anywhere'
       }
     : {
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis'
       };
-const formatTitle = (title: string, selected: boolean): string =>
-  selected || title.length <= MAX_TITLE_LENGTH ? title : `${title.slice(0, MAX_TITLE_LENGTH)}…`;
+const formatTitle = (title: string, selected: boolean): string => {
+  const effectiveTitle = title.trim() ? title : PLACEHOLDER_TITLE;
+  return selected || effectiveTitle.length <= MAX_TITLE_LENGTH
+    ? effectiveTitle
+    : `${effectiveTitle.slice(0, MAX_TITLE_LENGTH)}…`;
+};
 
 const findContextById = (nodes: TreeItem[], targetId: string, parent: TreeItem | null = null): TreeContext | null => {
   for (let i = 0; i < nodes.length; i++) {
@@ -216,6 +226,81 @@ const findContextById = (nodes: TreeItem[], targetId: string, parent: TreeItem |
 const containsId = (node: TreeItem, targetId: string): boolean => {
   if (node.id === targetId) return true;
   return node.children?.some(child => containsId(child, targetId)) ?? false;
+};
+
+const ensureNodeOpenById = (nodes: TreeItem[], targetId: string): { tree: TreeItem[]; changed: boolean } => {
+  let changed = false;
+  const walk = (list: TreeItem[]): TreeItem[] =>
+    list.map(node => {
+      if (node.id === targetId) {
+        if (node.isOpen) return node;
+        changed = true;
+        return { ...node, isOpen: true };
+      }
+      if (!node.children?.length) return node;
+      const nextChildren = walk(node.children);
+      if (nextChildren !== node.children) {
+        changed = true;
+        return { ...node, children: nextChildren };
+      }
+      return node;
+    });
+  const tree = walk(nodes);
+  return { tree, changed };
+};
+const setAllNodesOpen = (nodes: TreeItem[], open: boolean): TreeItem[] =>
+  nodes.map(node => ({
+    ...node,
+    isOpen: open,
+    children: node.children ? setAllNodesOpen(node.children, open) : []
+  }));
+
+const getTreeOpenState = (nodes: TreeItem[]): TreeOpenState => {
+  if (!nodes.length) return 'all-closed';
+  let hasOpen = false;
+  let hasClosed = false;
+  const walk = (list: TreeItem[]) => {
+    for (const node of list) {
+      if (node.isOpen) hasOpen = true;
+      else hasClosed = true;
+      if (node.children?.length) walk(node.children);
+      if (hasOpen && hasClosed) return;
+    }
+  };
+  walk(nodes);
+  if (hasOpen && hasClosed) return 'mixed';
+  if (hasOpen) return 'all-open';
+  return 'all-closed';
+};
+
+const TreeStateIcon: FC<{ state: TreeOpenState }> = ({ state }) => {
+  if (state === 'all-open') {
+    return (
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+        <rect x="1.5" y="2" width="9" height="1.2" rx="0.6" fill="currentColor" />
+        <rect x="1.5" y="5.4" width="9" height="1.2" rx="0.6" fill="currentColor" />
+        <rect x="1.5" y="8.8" width="9" height="1.2" rx="0.6" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (state === 'all-closed') {
+    return (
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+        <polygon points="4,2 9,6 4,10" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+      <path
+        d="M2 3c.8-.4 1.6-.4 2.4 0s1.6.4 2.4 0 1.6-.4 2.4 0M2 9c.8-.4 1.6-.4 2.4 0s1.6.4 2.4 0 1.6-.4 2.4 0"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+        fill="none"
+      />
+    </svg>
+  );
 };
 
 const canPlaceNode = (tree: TreeItem[], dragId: string, targetId: string, position: InsertPosition): boolean => {
@@ -258,13 +343,15 @@ const moveNodeInTree = (data: TreeItem[], dragId: string, targetId: string, posi
 const ProjectSorter: FC = () => {
   const [data, setData] = useState<TreeItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
   const [enableOpacity, setEnableOpacity] = useState(DEFAULT_SETTINGS.enableOpacity);
   const [opacityMode, setOpacityMode] = useState<OpacityMode>(DEFAULT_SETTINGS.opacityMode);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [lengthWarning, setLengthWarning] = useState<{ id: string; excess: number } | null>(null);
-  const lastWheelTime = useRef<number>(0);
+  const treeOpenState = useMemo(() => getTreeOpenState(data), [data]);
+
   const dataInitializedRef = useRef(false);
   const settingsInitializedRef = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -380,15 +467,8 @@ const ProjectSorter: FC = () => {
         if (e.key === 'ArrowLeft') moveItem('left');
         if (e.key === 'Enter') setSelectedId(null);
     };
-    const w = (e: WheelEvent) => {
-        if (!selectedId || Date.now() - lastWheelTime.current < 60) return;
-        e.preventDefault();
-        lastWheelTime.current = Date.now();
-        moveItem(e.deltaY < 0 ? 'up' : 'down');
-    };
     window.addEventListener('keydown', k);
-    window.addEventListener('wheel', w, {passive:false});
-    return () => { window.removeEventListener('keydown', k); window.removeEventListener('wheel', w); };
+    return () => { window.removeEventListener('keydown', k); };
   }, [selectedId, moveItem]);
 
   const toggleOpen = (id: string) => setData(prev => {
@@ -401,11 +481,31 @@ const ProjectSorter: FC = () => {
     setSelectedId(null);
     setData(prev => {
         const u = collectIds(prev);
-        const n: TreeItem = { id: generateUniqueId(u), title: '新项目', isOpen: true, children: [] };
-        setTimeout(() => setSelectedId(n.id), 50);
+        const n: TreeItem = { id: generateUniqueId(u), title: '', isOpen: true, children: [] };
+        setTimeout(() => {
+          setSelectedId(n.id);
+          setPendingEditId(n.id);
+        }, 50);
         if (!parentId) return [...prev, n];
         const rec = (nodes: TreeItem[]): TreeItem[] => nodes.map(node => node.id === parentId ? { ...node, isOpen: true, children: [...node.children, n] } : { ...node, children: rec(node.children) });
         return rec(prev);
+    });
+  };
+
+  const handleSelect = (id: string) => {
+    setSelectedId(prev => (prev === id ? null : id));
+    setData(prev => {
+      const { tree, changed } = ensureNodeOpenById(prev, id);
+      return changed ? tree : prev;
+    });
+  };
+
+  const handleToggleAllNodes = () => {
+    setData(prev => {
+      if (!prev.length) return prev;
+      if (treeOpenState === 'all-open') return setAllNodesOpen(prev, false);
+      if (treeOpenState === 'all-closed') return setAllNodesOpen(prev, true);
+      return setAllNodesOpen(prev, true);
     });
   };
 
@@ -634,8 +734,16 @@ const ProjectSorter: FC = () => {
                          </div>
                     </div>
                 </div>
+                <button
+                    onClick={handleToggleAllNodes}
+                    disabled={!data.length}
+                    className={`ml-1 w-6 h-6 rounded-full flex items-center justify-center transition-all ${data.length ? 'bg-white text-slate-600 shadow-sm hover:bg-white/80' : 'text-slate-300 cursor-not-allowed bg-white/70'}`}
+                    title={treeOpenState === 'all-open' ? '全部收起' : treeOpenState === 'all-closed' ? '全部展开' : '全部展开'}
+                >
+                    <TreeStateIcon state={treeOpenState} />
+                </button>
 
-                <div className="w-px h-3 bg-slate-300/50 mx-0.5" />
+                <div className="w-px h-3 bg-slate-300/50 ml-2 mr-0.5" />
 
                 {/* 主操作按钮 */}
                 <div className="flex items-center gap-1">
@@ -681,10 +789,14 @@ const ProjectSorter: FC = () => {
                   deleteConfirmId={deleteConfirmId} deletingAncestor={false} selectedId={selectedId} draggingId={draggingId}
                   lengthWarningId={lengthWarning?.id ?? null}
                   lengthWarningExcess={lengthWarning?.excess ?? null}
+                  pendingEditId={pendingEditId}
                   onToggle={toggleOpen} onAdd={handleAdd} onDeleteRequest={handleDeleteRequest}
                   onConfirmDelete={confirmDelete} onRename={handleRename}
-                  onSelect={id => setSelectedId(id===selectedId?null:id)}
+                  onSelect={handleSelect}
                   onDragStart={handleDragStart} onDrop={handleDropOn} onPreviewMove={handlePreviewMove} onDragEnd={handleDragEnd}
+                  onResolvePendingEdit={id => {
+                    if (pendingEditId === id) setPendingEditId(null);
+                  }}
                 />
               ))}
             </ul>
@@ -711,9 +823,9 @@ const ProjectSorter: FC = () => {
 const TreeNode: FC<TreeNodeProps> = ({ 
   item, index, level, parentOpacity, 
   enableOpacity, opacityMode, deleteConfirmId, deletingAncestor, selectedId, draggingId,
-  lengthWarningId, lengthWarningExcess,
+  lengthWarningId, lengthWarningExcess, pendingEditId,
   onToggle, onAdd, onDeleteRequest, onConfirmDelete, onRename, onSelect,
-  onDragStart, onDrop, onPreviewMove, onDragEnd
+  onDragStart, onDrop, onPreviewMove, onDragEnd, onResolvePendingEdit
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(item.title);
@@ -730,13 +842,20 @@ const TreeNode: FC<TreeNodeProps> = ({
     if (!isEditing) setEditTitle(item.title);
   }, [item.title, isEditing]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isEditing && inputRef.current instanceof HTMLTextAreaElement) {
       const el = inputRef.current;
       el.style.height = 'auto';
       el.style.height = `${el.scrollHeight}px`;
     }
   }, [editTitle, isEditing]);
+
+  useEffect(() => {
+    if (pendingEditId === item.id && !isEditing) {
+      setIsEditing(true);
+      onResolvePendingEdit(item.id);
+    }
+  }, [pendingEditId, item.id, isEditing, onResolvePendingEdit]);
 
   const saveEdit = () => { if (editTitle.trim()) onRename(item.id, editTitle); else setEditTitle(item.title); setIsEditing(false); };
   
@@ -803,6 +922,7 @@ const TreeNode: FC<TreeNodeProps> = ({
               value={editTitle}
               onChange={e => setEditTitle(e.target.value)}
               onBlur={saveEdit}
+              rows={1}
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -814,16 +934,16 @@ const TreeNode: FC<TreeNodeProps> = ({
                 }
               }}
               className="w-full bg-transparent border border-slate-400/50 rounded px-2 py-1 text-sm focus:outline-none resize-none leading-relaxed"
-              style={{ whiteSpace: 'pre-wrap', overflow: 'hidden' }}
+              style={{ whiteSpace: 'pre-wrap', overflow: 'hidden', wordBreak: 'break-word', overflowWrap: 'anywhere' }}
               onClick={e => e.stopPropagation()}
             />
           ) : (
             <span
               onClick={(e) => { e.stopPropagation(); onSelect(item.id); }}
               onDoubleClick={e => { e.stopPropagation(); setIsEditing(true); }}
-              className="cursor-text hover:opacity-70 transition-opacity block w-full text-sm"
+              className={`cursor-text hover:opacity-70 transition-opacity block w-full text-sm ${item.title.trim() ? '' : 'text-slate-400 italic'}`}
               style={getTitleStyle(isSelected)}
-              title={item.title}
+              title={item.title.trim() ? item.title : PLACEHOLDER_TITLE}
             >
               {formatTitle(item.title, isSelected)}
             </span>
@@ -877,6 +997,7 @@ const TreeNode: FC<TreeNodeProps> = ({
                   draggingId={draggingId}
                   lengthWarningId={lengthWarningId}
                   lengthWarningExcess={lengthWarningExcess}
+                  pendingEditId={pendingEditId}
                   onToggle={onToggle}
                   onAdd={onAdd}
                   onDeleteRequest={onDeleteRequest}
@@ -887,6 +1008,7 @@ const TreeNode: FC<TreeNodeProps> = ({
                   onDrop={onDrop}
                   onPreviewMove={onPreviewMove}
                   onDragEnd={onDragEnd}
+                  onResolvePendingEdit={onResolvePendingEdit}
                 />
             ))}
         </ul>
