@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ProjectSorter.tsx
  * ---------------------------------------------------------------------------
  * 层级项目清单组件，强调透明度递进形成的纵深感。
@@ -32,6 +32,19 @@ type OpacityMode = 1 | 2 | 3;
 type InsertPosition = 'before' | 'after' | 'inside';
 type ScrollDirection = -1 | 0 | 1;
 type TreeOpenState = 'all-open' | 'all-closed' | 'mixed';
+const SNAP_PREP_MS = 160;
+const SNAP_ANIMATION_MS = 450;
+interface SnapOverlayEntry {
+  id: string;
+  rect: DOMRect;
+  item: TreeItem;
+}
+interface SnapPlaceholder {
+  id: string;
+  parentId: string | null;
+  index: number;
+  height: number;
+}
 
 const TRANSPARENT_DRAG_IMAGE = (() => {
   if (typeof Image === 'undefined') return null;
@@ -65,9 +78,13 @@ interface TreeNodeProps {
   deletingAncestor: boolean;
   selectedId: string | null;
   draggingId: string | null;
+  snappingIds: Set<string>;
   lengthWarningId: string | null;
   lengthWarningExcess: number | null;
   pendingEditId: string | null;
+  registerHeaderRef: (id: string, el: HTMLDivElement | null) => void;
+  registerLiRef: (id: string, el: HTMLLIElement | null) => void;
+  snapPlaceholders: SnapPlaceholder[];
   onToggle: (id: string) => void;
   onAdd: (parentId: string | null, level: number) => void;
   onDeleteRequest: (id: string) => void;
@@ -265,6 +282,66 @@ const setAllNodesOpen = (nodes: TreeItem[], open: boolean): TreeItem[] =>
     children: node.children ? setAllNodesOpen(node.children, open) : []
   }));
 
+const findNodeById = (nodes: TreeItem[], targetId: string): TreeItem | null => {
+  const ctx = findContextById(nodes, targetId);
+  return ctx?.node ?? null;
+};
+
+const collectSubtreeIds = (node: TreeItem): string[] => {
+  const ids: string[] = [node.id];
+  node.children?.forEach(child => ids.push(...collectSubtreeIds(child)));
+  return ids;
+};
+
+const removeNodesByIds = (nodes: TreeItem[], ids: Set<string>): TreeItem[] =>
+  nodes
+    .filter(n => !ids.has(n.id))
+    .map(n => ({ ...n, children: removeNodesByIds(n.children, ids) }));
+
+const spawnCrumbsFromElement = (el: HTMLElement) => {
+  if (typeof document === 'undefined') return;
+  const particleCount = 16;
+  const rect = el.getBoundingClientRect();
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  spawnCrumbsAtPoint(centerX, centerY, particleCount);
+};
+
+const spawnCrumbsAtPoint = (centerX: number, centerY: number, particleCount = 16) => {
+  if (typeof document === 'undefined') return;
+
+  for (let i = 0; i < particleCount; i++) {
+    const crumb = document.createElement('div');
+    crumb.style.position = 'absolute';
+    crumb.style.width = '6px';
+    crumb.style.height = '6px';
+    crumb.style.backgroundColor = '#ff6b6b';
+    crumb.style.borderRadius = '50%';
+    crumb.style.pointerEvents = 'none';
+    crumb.style.zIndex = '9999';
+    crumb.style.left = `${centerX}px`;
+    crumb.style.top = `${centerY}px`;
+    document.body.appendChild(crumb);
+
+    const angle = Math.random() * Math.PI * 2;
+    const tx = Math.cos(angle) * (40 + Math.random() * 40);
+    const ty = Math.sin(angle) * (40 + Math.random() * 40);
+
+    const animation = crumb.animate(
+      [
+        { transform: 'translate(0, 0) scale(1)', opacity: 1 },
+        { transform: `translate(${tx}px, ${ty}px) scale(0)`, opacity: 0 }
+      ],
+      {
+        duration: 800 + Math.random() * 400,
+        easing: 'ease-out'
+      }
+    );
+
+    animation.onfinish = () => crumb.remove();
+  }
+};
+
 const getTreeOpenState = (nodes: TreeItem[]): TreeOpenState => {
   if (!nodes.length) return 'all-closed';
   let hasOpen = false;
@@ -352,6 +429,9 @@ const ProjectSorter: FC = () => {
   const [opacityMode, setOpacityMode] = useState<OpacityMode>(DEFAULT_SETTINGS.opacityMode);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [lengthWarning, setLengthWarning] = useState<{ id: string; excess: number } | null>(null);
+  const [snappingIds, setSnappingIds] = useState<Set<string>>(new Set());
+  const [snapOverlays, setSnapOverlays] = useState<SnapOverlayEntry[]>([]);
+  const [snapPlaceholders, setSnapPlaceholders] = useState<SnapPlaceholder[]>([]);
   const treeOpenState = useMemo(() => getTreeOpenState(data), [data]);
 
   const dataInitializedRef = useRef(false);
@@ -360,6 +440,8 @@ const ProjectSorter: FC = () => {
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollDirectionRef = useRef<ScrollDirection>(0);
   const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const headerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const liRefs = useRef<Map<string, HTMLLIElement>>(new Map());
 
   useEffect(() => {
       return () => {
@@ -410,7 +492,37 @@ const ProjectSorter: FC = () => {
 
   useEffect(() => {
     const s = document.createElement('style');
-    s.textContent = `@keyframes drag-slide { from { transform: translateY(2px); } to { transform: translateY(0); } }`;
+    s.textContent = `
+      @keyframes drag-slide { from { transform: translateY(2px); } to { transform: translateY(0); } }
+      @keyframes snapLeft {
+        0% { transform: translateX(0) rotate(0); opacity: 1; }
+        70% { transform: translateX(-80px) rotate(-12deg); opacity: 1; }
+        100% { transform: translateX(-90px) rotate(-12deg); opacity: 0; }
+      }
+      @keyframes snapRight {
+        0% { transform: translateX(0) rotate(0); opacity: 1; }
+        70% { transform: translateX(80px) rotate(12deg); opacity: 1; }
+        100% { transform: translateX(90px) rotate(12deg); opacity: 0; }
+      }
+      .snap-clip-left { clip-path: polygon(0% 0%, 55% 0%, 48% 40%, 52% 60%, 45% 100%, 0% 100%); }
+      .snap-clip-right { clip-path: polygon(55% 0%, 100% 0%, 100% 100%, 45% 100%, 52% 60%, 48% 40%); }
+      .snap-left-anim { animation: snapLeft ${SNAP_ANIMATION_MS}ms forwards cubic-bezier(0.25, 1, 0.5, 1); }
+      .snap-right-anim { animation: snapRight ${SNAP_ANIMATION_MS}ms forwards cubic-bezier(0.25, 1, 0.5, 1); }
+      @keyframes snapGrow {
+        0% { transform: scale(1); opacity: 1; }
+        80% { transform: scale(1.08); opacity: 1; }
+        100% { transform: scale(1.12); opacity: 0; visibility: hidden; }
+      }
+      .snap-grow { animation: snapGrow ${SNAP_PREP_MS}ms forwards cubic-bezier(0.25, 1, 0.5, 1); }
+      @keyframes snapPlaceholderBump {
+        0% { height: var(--ph-h); opacity: 0.85; }
+        35% { height: calc(var(--ph-h) * 1.18); opacity: 0.85; }
+        60% { height: calc(var(--ph-h) * 1.05); opacity: 0.75; }
+        80% { height: 6px; opacity: 0.45; }
+        100% { height: 0px; opacity: 0; margin-top: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; }
+      }
+      .snap-placeholder-anim { overflow: hidden; animation: snapPlaceholderBump ${SNAP_PREP_MS + SNAP_ANIMATION_MS}ms ease-in forwards; }
+    `;
     document.head.appendChild(s);
     return () => s.remove();
   }, []);
@@ -548,10 +660,63 @@ const ProjectSorter: FC = () => {
   };
 
   const confirmDelete = (id: string) => {
-    const rec = (nodes: TreeItem[]): TreeItem[] => nodes.filter(n => n.id !== id).map(n => ({ ...n, children: rec(n.children) }));
-    setData(prev => rec(prev));
+    const targetNode = findNodeById(data, id);
+    const ctx = findContextById(data, id);
+    const parentIdForPlaceholder = ctx?.parent?.id ?? null;
+    const indexForPlaceholder = ctx?.index ?? 0;
+    const liRect = liRefs.current.get(id)?.getBoundingClientRect();
+    const baseHeight = liRect?.height ?? headerRefs.current.get(id)?.getBoundingClientRect().height ?? 48;
+    if (!targetNode) {
+      const idsSet = new Set([id]);
+      setSnappingIds(prev => new Set([...prev, ...idsSet]));
+      setSnapPlaceholders(prev => [...prev, { id, parentId: parentIdForPlaceholder, index: indexForPlaceholder, height: baseHeight }]);
+      setData(prev => removeNodesByIds(prev, idsSet));
+      setTimeout(() => {
+        setSnappingIds(prev => {
+          const next = new Set(prev);
+          idsSet.forEach(d => next.delete(d));
+          return next;
+        });
+        setSnapPlaceholders(prev => prev.filter(p => !idsSet.has(p.id)));
+      }, SNAP_PREP_MS + SNAP_ANIMATION_MS + 80);
+      return;
+    }
+    const ids = collectSubtreeIds(targetNode);
+    const idsSet = new Set(ids);
+    const overlays: SnapOverlayEntry[] = [];
+    const placeholders: SnapPlaceholder[] = [];
+    ids.forEach(nid => {
+      const nodeCtx = findContextById(data, nid);
+      const nodeParentId = nodeCtx?.parent?.id ?? null;
+      const nodeIndex = nodeCtx?.index ?? 0;
+      const liRect = liRefs.current.get(nid)?.getBoundingClientRect();
+      const headerRect = headerRefs.current.get(nid)?.getBoundingClientRect();
+      const height = liRect?.height ?? headerRect?.height ?? 48;
+      placeholders.push({ id: nid, parentId: nodeParentId, index: nodeIndex, height });
+      const el = headerRefs.current.get(nid);
+      const snapNode = nodeCtx?.node ?? targetNode;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        overlays.push({ id: nid, rect, item: snapNode });
+        spawnCrumbsAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      }
+    });
     setDeleteConfirmId(null);
-    if (selectedId === id) setSelectedId(null);
+    setSelectedId(prev => (prev && idsSet.has(prev) ? null : prev));
+    if (overlays.length) setSnapOverlays(prev => [...prev, ...overlays]);
+    setSnappingIds(prev => new Set([...prev, ...ids]));
+    setSnapPlaceholders(prev => [...prev, ...placeholders]);
+    // 删除数据立即生效，列表通过占位保持高度
+    setData(prev => removeNodesByIds(prev, idsSet));
+    setTimeout(() => {
+      setSnappingIds(prev => {
+        const next = new Set(prev);
+        ids.forEach(d => next.delete(d));
+        return next;
+      });
+      setSnapPlaceholders(prev => prev.filter(p => !idsSet.has(p.id)));
+      setSnapOverlays(prev => prev.filter(o => !idsSet.has(o.id)));
+    }, SNAP_PREP_MS + SNAP_ANIMATION_MS + 80);
   };
 
   const stopAutoScroll = useCallback(() => {
@@ -784,24 +949,45 @@ const ProjectSorter: FC = () => {
             </div>
           ) : (
             <ul className="space-y-3 pb-8"> 
-              {data.map((item, index) => (
-                <TreeNode 
-                  key={item.id} 
-                  item={item} index={index} level={0}
-                  parentOpacity={1} enableOpacity={enableOpacity} opacityMode={opacityMode}
-                  deleteConfirmId={deleteConfirmId} deletingAncestor={false} selectedId={selectedId} draggingId={draggingId}
-                  lengthWarningId={lengthWarning?.id ?? null}
-                  lengthWarningExcess={lengthWarning?.excess ?? null}
-                  pendingEditId={pendingEditId}
-                  onToggle={toggleOpen} onAdd={handleAdd} onDeleteRequest={handleDeleteRequest}
-                  onConfirmDelete={confirmDelete} onRename={handleRename}
-                  onSelect={handleSelect}
-                  onDragStart={handleDragStart} onDrop={handleDropOn} onPreviewMove={handlePreviewMove} onDragEnd={handleDragEnd}
-                  onResolvePendingEdit={id => {
-                    if (pendingEditId === id) setPendingEditId(null);
-                  }}
-                />
-              ))}
+              {(() => {
+                const rootPlaceholders = snapPlaceholders.filter(p => p.parentId === null).sort((a, b) => a.index - b.index);
+                const total = data.length + rootPlaceholders.length;
+                const placeholderMap = new Map(rootPlaceholders.map(p => [p.index, p]));
+                let dataPtr = 0;
+                return Array.from({ length: total }).map((_, slot) => {
+                  const placeholder = placeholderMap.get(slot);
+                  if (placeholder) return <SnapPlaceholderItem key={`ph-root-${placeholder.id}`} placeholder={placeholder} level={0} />;
+                  const item = data[dataPtr++];
+                  if (!item) return null;
+                  return (
+                    <TreeNode 
+                      key={item.id} 
+                      item={item} index={slot} level={0}
+                      parentOpacity={1} enableOpacity={enableOpacity} opacityMode={opacityMode}
+                      deleteConfirmId={deleteConfirmId} deletingAncestor={false} selectedId={selectedId} draggingId={draggingId} snappingIds={snappingIds}
+                      lengthWarningId={lengthWarning?.id ?? null}
+                      lengthWarningExcess={lengthWarning?.excess ?? null}
+                      pendingEditId={pendingEditId}
+                      registerHeaderRef={(nid, el) => {
+                        if (!el) headerRefs.current.delete(nid);
+                        else headerRefs.current.set(nid, el);
+                      }}
+                      registerLiRef={(nid, el) => {
+                        if (!el) liRefs.current.delete(nid);
+                        else liRefs.current.set(nid, el);
+                      }}
+                      snapPlaceholders={snapPlaceholders}
+                      onToggle={toggleOpen} onAdd={handleAdd} onDeleteRequest={handleDeleteRequest}
+                      onConfirmDelete={confirmDelete} onRename={handleRename}
+                      onSelect={handleSelect}
+                      onDragStart={handleDragStart} onDrop={handleDropOn} onPreviewMove={handlePreviewMove} onDragEnd={handleDragEnd}
+                      onResolvePendingEdit={id => {
+                        if (pendingEditId === id) setPendingEditId(null);
+                      }}
+                    />
+                  );
+                });
+              })()}
             </ul>
           )}
         </div>
@@ -817,29 +1003,35 @@ const ProjectSorter: FC = () => {
                  <button onClick={handleClearAll} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500 text-white hover:bg-red-600 shadow-md">确认</button>
                </div>
             </div>
-          </div>
-        )}
+        </div>
+      )}
+      {snapOverlays.map(entry => (
+        <SnapOverlay key={`${entry.id}-${entry.rect.top}-${entry.rect.left}`} entry={entry} />
+      ))}
     </div>
   );
 };
 
 const TreeNode: FC<TreeNodeProps> = ({ 
   item, index, level, parentOpacity, 
-  enableOpacity, opacityMode, deleteConfirmId, deletingAncestor, selectedId, draggingId,
-  lengthWarningId, lengthWarningExcess, pendingEditId,
+  enableOpacity, opacityMode, deleteConfirmId, deletingAncestor, selectedId, draggingId, snappingIds,
+  lengthWarningId, lengthWarningExcess, pendingEditId, registerHeaderRef, registerLiRef, snapPlaceholders,
   onToggle, onAdd, onDeleteRequest, onConfirmDelete, onRename, onSelect,
   onDragStart, onDrop, onPreviewMove, onDragEnd, onResolvePendingEdit
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(item.title);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  const liRef = useRef<HTMLLIElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const childListRef = useRef<HTMLUListElement>(null);
   const centerHoverStartRef = useRef<number|null>(null);
   const deleteBtnRef = useRef<HTMLButtonElement>(null);
+  const [snapHeight, setSnapHeight] = useState<number | null>(null);
 
   const isSelected = selectedId === item.id;
-  const isActive = isSelected || draggingId === item.id;
+  const isSnapping = snappingIds.has(item.id);
+  const isActive = !isSnapping && (isSelected || draggingId === item.id);
   useEffect(() => { if (isEditing && inputRef.current) inputRef.current.focus(); }, [isEditing]);
   useEffect(() => {
     if (!isEditing) setEditTitle(item.title);
@@ -860,6 +1052,19 @@ const TreeNode: FC<TreeNodeProps> = ({
     }
   }, [pendingEditId, item.id, isEditing, onResolvePendingEdit]);
 
+  useEffect(() => {
+    if (isSnapping && headerRef.current) spawnCrumbsFromElement(headerRef.current);
+  }, [isSnapping]);
+
+  useLayoutEffect(() => {
+    if (liRef.current && !isSnapping) {
+      const h = liRef.current.getBoundingClientRect().height;
+      if (h && h !== snapHeight) setSnapHeight(h);
+      registerHeaderRef(item.id, headerRef.current);
+    }
+    return () => registerHeaderRef(item.id, null);
+  }, [isSnapping, snapHeight, item.id, registerHeaderRef]);
+
   const saveEdit = () => { if (editTitle.trim()) onRename(item.id, editTitle); else setEditTitle(item.title); setIsEditing(false); };
   
   let localOpacity = 1;
@@ -870,20 +1075,101 @@ const TreeNode: FC<TreeNodeProps> = ({
   }
   const currentOpacity = parentOpacity * Math.max(0.01, localOpacity);
 
-  const isDeleting = deletingAncestor || deleteConfirmId === item.id;
+  const isDeleting = deletingAncestor || deleteConfirmId === item.id || isSnapping;
+  const visibleOpacity = isSnapping ? Math.max(currentOpacity, 0.4) : currentOpacity;
   const baseContainerClass = `group relative flex items-center gap-2 bg-white/40 border border-white/60 shadow-sm text-slate-700 rounded-full px-3 py-1.5 hover:bg-white/80 cursor-pointer hover:!opacity-100 hover:shadow-md hover:border-white transition-all duration-300`;
   const containerClass = isDeleting 
     ? `relative flex items-center gap-2 bg-red-50/80 border border-red-200 shadow-sm text-red-700 rounded-full px-3 py-1.5 cursor-pointer hover:!opacity-100`
     : `${baseContainerClass} ${isActive ? 'ring-2 ring-[#5B8DEF]/40' : ''}`;
 
+  const renderNodeBody = (withRef: boolean, extraClass = '', disablePointer = false) => (
+    <div 
+      className={`${containerClass} ${extraClass} ${disablePointer ? 'pointer-events-none' : ''}`}
+      style={{ opacity: visibleOpacity, transition: 'all 0.3s ease', animation: draggingId ? 'drag-slide 0.32s' : undefined, minWidth: MIN_NODE_WIDTH }}
+      ref={withRef ? (el => { headerRef.current = el; if (el) registerHeaderRef(item.id, el); }) : undefined}
+      onClick={disablePointer ? undefined : (e) => { e.stopPropagation(); onSelect(item.id); }}
+    >
+      <div className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full cursor-pointer transition-all hover:bg-black/5 text-slate-500" onClick={disablePointer ? undefined : (e) => { e.stopPropagation(); onToggle(item.id); }}>
+         {item.children?.length ? (item.isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <Circle size={4} className="fill-current opacity-40 stroke-none" />}
+      </div>
+      <div className="flex-1 min-w-0 flex items-baseline mr-1">
+        {isEditing ? (
+          <textarea
+            ref={withRef ? (inputRef as RefObject<HTMLTextAreaElement>) : undefined}
+            value={editTitle}
+            onChange={e => setEditTitle(e.target.value)}
+            onBlur={saveEdit}
+            rows={1}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                saveEdit();
+              }
+              if (e.key === 'Escape') {
+                setEditTitle(item.title);
+                setIsEditing(false);
+              }
+            }}
+            className="w-full bg-transparent border border-slate-400/50 rounded px-2 py-1 text-sm focus:outline-none resize-none leading-relaxed"
+            style={{ whiteSpace: 'pre-wrap', overflow: 'hidden', wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+            onClick={e => e.stopPropagation()}
+            readOnly={disablePointer}
+          />
+        ) : (
+          <span
+            onClick={disablePointer ? undefined : (e) => { e.stopPropagation(); onSelect(item.id); }}
+            onDoubleClick={disablePointer ? undefined : (e) => { e.stopPropagation(); setIsEditing(true); }}
+            className={`cursor-text hover:opacity-70 transition-opacity block w-full text-sm ${item.title.trim() ? '' : 'text-slate-400 italic'}`}
+            style={getTitleStyle(isSelected)}
+            title={item.title.trim() ? item.title : PLACEHOLDER_TITLE}
+          >
+            {formatTitle(item.title, isSelected)}
+          </span>
+        )}
+      </div>
+      {lengthWarningId === item.id && lengthWarningExcess !== null && (
+        <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-red-100 text-red-600 text-[11px] font-medium px-2 py-0.5 rounded-full border border-red-200 shadow-sm animate-in fade-in duration-200">
+          超出了{lengthWarningExcess}字
+        </div>
+      )}
+      <div className={`flex items-center gap-0.5 ${deleteConfirmId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-all duration-200 delete-action-area relative`}>
+        <button
+          onClick={disablePointer ? undefined : (e) => { e.stopPropagation(); onAdd(item.id, level); }}
+          disabled={level >= MAX_DEPTH - 1}
+          className={`p-1 rounded-full transition-all ${level >= MAX_DEPTH - 1 ? 'text-slate-300 cursor-not-allowed' : 'hover:bg-black/5'}`}
+          title={level >= MAX_DEPTH - 1 ? '最多 5 层，无法再添加子节点' : '添加子节点'}
+        >
+          <Plus size={14} />
+        </button>
+        <div className="relative">
+           <button
+             ref={withRef ? deleteBtnRef : undefined}
+             onClick={disablePointer ? undefined : (e) => { e.stopPropagation(); onDeleteRequest(item.id); }}
+             className={`p-1 rounded-full transition-all ${deleteConfirmId === item.id ? 'bg-red-500 text-white' : 'hover:bg-red-500/10 hover:text-red-600'}`}
+           >
+             <Trash2 size={14} />
+           </button>
+           {deleteConfirmId === item.id && withRef && (
+             <DeleteConfirmPopover
+               anchorEl={deleteBtnRef.current}
+               onConfirm={(e) => { e.stopPropagation(); onConfirmDelete(item.id); }}
+             />
+           )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <li 
       className="select-none transition-all duration-300 ease-in-out project-item" 
       style={{ paddingLeft: level > 0 ? '0.5rem' : '0', zIndex: 50 - level * 5 - index }}
-      draggable={!isEditing} 
+      draggable={!isEditing && !isSnapping} 
+      ref={el => { liRef.current = el; registerLiRef(item.id, el); }}
       onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', item.id); if(TRANSPARENT_DRAG_IMAGE) e.dataTransfer.setDragImage(TRANSPARENT_DRAG_IMAGE,0,0); onDragStart(item.id); }}
       onDragOver={(e) => {
           e.preventDefault(); e.stopPropagation();
+          if (isSnapping) return;
           if (item.isOpen && childListRef.current) { const r = childListRef.current.getBoundingClientRect(); if (e.clientY >= r.top && e.clientY <= r.bottom) return; }
           if (draggingId && draggingId !== item.id) {
             const rect = (headerRef.current ?? e.currentTarget).getBoundingClientRect();
@@ -898,6 +1184,7 @@ const TreeNode: FC<TreeNodeProps> = ({
       }}
       onDrop={(e) => {
           e.preventDefault(); e.stopPropagation();
+          if (isSnapping) return;
           if (item.isOpen && childListRef.current) { const r = childListRef.current.getBoundingClientRect(); if (e.clientY >= r.top && e.clientY <= r.bottom) return; }
           const rect = (headerRef.current ?? e.currentTarget).getBoundingClientRect();
           const y = e.clientY, top = rect.top, h = rect.height;
@@ -909,87 +1196,45 @@ const TreeNode: FC<TreeNodeProps> = ({
       }}
       onDragEnd={(e) => { e.stopPropagation(); centerHoverStartRef.current = null; onDragEnd(); }}
     >
-      <div 
-        className={containerClass}
-        style={{ opacity: currentOpacity, transition: 'all 0.3s ease', animation: draggingId ? 'drag-slide 0.32s' : undefined, minWidth: MIN_NODE_WIDTH }}
-        ref={headerRef}
-        onClick={(e) => { e.stopPropagation(); onSelect(item.id); }}
-      >
-        <div className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full cursor-pointer transition-all hover:bg-black/5 text-slate-500" onClick={(e) => { e.stopPropagation(); onToggle(item.id); }}>
-           {item.children?.length ? (item.isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <Circle size={4} className="fill-current opacity-40 stroke-none" />}
-        </div>
-        <div className="flex-1 min-w-0 flex items-baseline mr-1">
-          {isEditing ? (
-            <textarea
-              ref={inputRef as RefObject<HTMLTextAreaElement>}
-              value={editTitle}
-              onChange={e => setEditTitle(e.target.value)}
-              onBlur={saveEdit}
-              rows={1}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  saveEdit();
-                }
-                if (e.key === 'Escape') {
-                  setEditTitle(item.title);
-                  setIsEditing(false);
-                }
-              }}
-              className="w-full bg-transparent border border-slate-400/50 rounded px-2 py-1 text-sm focus:outline-none resize-none leading-relaxed"
-              style={{ whiteSpace: 'pre-wrap', overflow: 'hidden', wordBreak: 'break-word', overflowWrap: 'anywhere' }}
-              onClick={e => e.stopPropagation()}
-            />
-          ) : (
-            <span
-              onClick={(e) => { e.stopPropagation(); onSelect(item.id); }}
-              onDoubleClick={e => { e.stopPropagation(); setIsEditing(true); }}
-              className={`cursor-text hover:opacity-70 transition-opacity block w-full text-sm ${item.title.trim() ? '' : 'text-slate-400 italic'}`}
-              style={getTitleStyle(isSelected)}
-              title={item.title.trim() ? item.title : PLACEHOLDER_TITLE}
+      <div className="relative" style={isSnapping && snapHeight ? { height: snapHeight } : undefined}>
+        {!isSnapping && renderNodeBody(true, '', isSnapping)}
+        {isSnapping && (
+          <>
+            {renderNodeBody(true, 'opacity-0 pointer-events-none absolute inset-0', true)}
+            <div
+              className="absolute inset-0 snap-clip-left snap-left-anim pointer-events-none"
+              style={{ animationDelay: `${SNAP_PREP_MS}ms` }}
             >
-              {formatTitle(item.title, isSelected)}
-            </span>
-          )}
-        </div>
-        {lengthWarningId === item.id && lengthWarningExcess !== null && (
-          <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-red-100 text-red-600 text-[11px] font-medium px-2 py-0.5 rounded-full border border-red-200 shadow-sm animate-in fade-in duration-200">
-            超出了{lengthWarningExcess}字
-          </div>
+              {renderNodeBody(false, '', true)}
+            </div>
+            <div
+              className="absolute inset-0 snap-clip-right snap-right-anim pointer-events-none"
+              style={{ animationDelay: `${SNAP_PREP_MS}ms` }}
+            >
+              {renderNodeBody(false, '', true)}
+            </div>
+          </>
         )}
-        <div className={`flex items-center gap-0.5 ${deleteConfirmId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-all duration-200 delete-action-area relative`}>
-          <button
-            onClick={e => { e.stopPropagation(); onAdd(item.id, level); }}
-            disabled={level >= MAX_DEPTH - 1}
-            className={`p-1 rounded-full transition-all ${level >= MAX_DEPTH - 1 ? 'text-slate-300 cursor-not-allowed' : 'hover:bg-black/5'}`}
-            title={level >= MAX_DEPTH - 1 ? '最多 5 层，无法再添加子节点' : '添加子节点'}
-          >
-            <Plus size={14} />
-          </button>
-          <div className="relative">
-             <button
-               ref={deleteBtnRef}
-               onClick={e => { e.stopPropagation(); onDeleteRequest(item.id); }}
-               className={`p-1 rounded-full transition-all ${deleteConfirmId === item.id ? 'bg-red-500 text-white' : 'hover:bg-red-500/10 hover:text-red-600'}`}
-             >
-               <Trash2 size={14} />
-             </button>
-             {deleteConfirmId === item.id && (
-               <DeleteConfirmPopover
-                 anchorEl={deleteBtnRef.current}
-                 onConfirm={(e) => { e.stopPropagation(); onConfirmDelete(item.id); }}
-               />
-             )}
-          </div>
-        </div>
       </div>
-      {item.isOpen && item.children?.length > 0 && (
+      {!isSnapping && item.isOpen && (item.children?.length || snapPlaceholders.some(p => p.parentId === item.id)) ? (
         <ul ref={childListRef} className="mt-1.5 space-y-1.5 border-l border-white/20 ml-2 pl-1 relative">
-            {item.children.map((child, idx) => (
+          {(() => {
+            const childPlaceholders = snapPlaceholders.filter(p => p.parentId === item.id).sort((a, b) => a.index - b.index);
+            const total = (item.children?.length ?? 0) + childPlaceholders.length;
+            const placeholderMap = new Map(childPlaceholders.map(p => [p.index, p]));
+            let childPtr = 0;
+            return Array.from({ length: total }).map((_, slot) => {
+              const placeholder = placeholderMap.get(slot);
+              if (placeholder) {
+                return <SnapPlaceholderItem key={`ph-${placeholder.id}`} placeholder={placeholder} level={level + 1} />;
+              }
+              const child = item.children?.[childPtr++];
+              if (!child) return null;
+              return (
                 <TreeNode
                   key={child.id}
                   item={child}
-                  index={idx}
+                  index={slot}
                   level={level + 1}
                   parentOpacity={currentOpacity}
                   enableOpacity={enableOpacity}
@@ -998,9 +1243,13 @@ const TreeNode: FC<TreeNodeProps> = ({
                   deletingAncestor={isDeleting}
                   selectedId={selectedId}
                   draggingId={draggingId}
+                  snappingIds={snappingIds}
                   lengthWarningId={lengthWarningId}
                   lengthWarningExcess={lengthWarningExcess}
                   pendingEditId={pendingEditId}
+                  registerHeaderRef={registerHeaderRef}
+                  registerLiRef={registerLiRef}
+                  snapPlaceholders={snapPlaceholders}
                   onToggle={onToggle}
                   onAdd={onAdd}
                   onDeleteRequest={onDeleteRequest}
@@ -1013,9 +1262,11 @@ const TreeNode: FC<TreeNodeProps> = ({
                   onDragEnd={onDragEnd}
                   onResolvePendingEdit={onResolvePendingEdit}
                 />
-            ))}
+              );
+            });
+          })()}
         </ul>
-      )}
+      ) : null}
     </li>
   );
 };
@@ -1068,4 +1319,60 @@ const DeleteConfirmPopover: FC<DeleteConfirmPopoverProps> = ({ anchorEl, onConfi
     </div>,
     document.body
   );
+};
+
+const SnapPlaceholderItem: FC<{ placeholder: SnapPlaceholder; level: number }> = ({ placeholder, level }) => (
+  <li
+    className="project-item snap-placeholder-anim"
+    style={{
+      paddingLeft: level > 0 ? '0.5rem' : '0',
+      height: placeholder.height,
+      visibility: 'hidden',
+      ['--ph-h' as string]: `${placeholder.height}px`
+    }}
+  />
+);
+
+const SnapOverlay: FC<{ entry: SnapOverlayEntry }> = ({ entry }) => {
+  if (typeof document === 'undefined') return null;
+  const style: React.CSSProperties = {
+    position: 'fixed',
+    top: entry.rect.top,
+    left: entry.rect.left,
+    width: entry.rect.width,
+    height: entry.rect.height,
+    pointerEvents: 'none',
+    zIndex: 2000
+  };
+  const content = (
+    <div className="relative w-full h-full">
+      <div className="absolute inset-0 snap-clip-left snap-left-anim pointer-events-none">
+        <div className="w-full h-full flex items-center gap-2 rounded-full px-3 py-1.5"
+          style={{ background: '#FDECEC', border: '1px solid #F7C7C6', color: '#7A879B', boxShadow: '0 6px 18px rgba(255,128,128,0.15)' }}>
+          <div className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full text-[#e65855]">
+            {entry.item.children?.length ? <ChevronDown size={14} /> : <Circle size={4} className="fill-current opacity-70 stroke-none" />}
+          </div>
+          <div className="flex-1 min-w-0 text-sm font-semibold">
+            <span className="block w-full" style={getTitleStyle(false)} title={entry.item.title.trim() ? entry.item.title : PLACEHOLDER_TITLE}>
+              {formatTitle(entry.item.title, false)}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="absolute inset-0 snap-clip-right snap-right-anim pointer-events-none">
+        <div className="w-full h-full flex items-center gap-2 rounded-full px-3 py-1.5"
+          style={{ background: '#FDECEC', border: '1px solid #F7C7C6', color: '#7A879B', boxShadow: '0 6px 18px rgba(255,128,128,0.15)' }}>
+          <div className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full text-[#e65855]">
+            {entry.item.children?.length ? <ChevronDown size={14} /> : <Circle size={4} className="fill-current opacity-70 stroke-none" />}
+          </div>
+          <div className="flex-1 min-w-0 text-sm font-semibold">
+            <span className="block w-full" style={getTitleStyle(false)} title={entry.item.title.trim() ? entry.item.title : PLACEHOLDER_TITLE}>
+              {formatTitle(entry.item.title, false)}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+  return createPortal(<div style={style}>{content}</div>, document.body);
 };
