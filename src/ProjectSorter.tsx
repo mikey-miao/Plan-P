@@ -269,15 +269,16 @@ const getTreeOpenState = (nodes: TreeItem[]): TreeOpenState => {
   if (!nodes.length) return 'all-closed';
   let hasOpen = false;
   let hasClosed = false;
-  const walk = (list: TreeItem[]) => {
+  const walk = (list: TreeItem[], ancestorClosed: boolean) => {
     for (const node of list) {
-      if (node.isOpen) hasOpen = true;
+      const isBranchOpen = !ancestorClosed && !!node.isOpen;
+      if (isBranchOpen) hasOpen = true;
       else hasClosed = true;
-      if (node.children?.length) walk(node.children);
+      if (node.children?.length) walk(node.children, ancestorClosed || !node.isOpen);
       if (hasOpen && hasClosed) return;
     }
   };
-  walk(nodes);
+  walk(nodes, false);
   if (hasOpen && hasClosed) return 'mixed';
   if (hasOpen) return 'all-open';
   return 'all-closed';
